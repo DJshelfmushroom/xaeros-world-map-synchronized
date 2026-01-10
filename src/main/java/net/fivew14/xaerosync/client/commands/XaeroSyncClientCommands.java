@@ -71,13 +71,18 @@ public class XaeroSyncClientCommands {
         source.sendSuccess(() -> Component.literal("=== XaeroSync Queue Status ==="), false);
         source.sendSuccess(() -> Component.literal("Upload Queue Size: " + manager.getUploadQueueSize()), false);
         source.sendSuccess(() -> Component.literal("Download Queue Size: " + manager.getDownloadQueueSize()), false);
+        source.sendSuccess(() -> Component.literal("Pending Downloads: " + manager.getPendingDownloadsSize()), false);
         
         ClientTimestampTracker tracker = manager.getTimestampTracker();
         int needingUpload = tracker.getChunksNeedingUpload().size();
         int needingDownload = tracker.getChunksNeedingDownload().size();
+        String worldId = tracker.getCurrentWorldId();
         
         source.sendSuccess(() -> Component.literal("Chunks Needing Upload: " + needingUpload), false);
         source.sendSuccess(() -> Component.literal("Chunks Needing Download: " + needingDownload), false);
+        source.sendSuccess(() -> Component.literal("Local Timestamps: " + tracker.getLocalCount()), false);
+        source.sendSuccess(() -> Component.literal("Server Timestamps: " + tracker.getServerCount()), false);
+        source.sendSuccess(() -> Component.literal("World ID: " + (worldId != null ? worldId : "(not set)")), false);
         
         if (!manager.isSyncEnabled()) {
             source.sendSuccess(() -> Component.literal("Note: Sync is disabled - queues won't process"), false);

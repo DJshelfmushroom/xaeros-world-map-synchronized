@@ -57,6 +57,20 @@ public class ClientSyncManager {
     // Pending chunks (waiting for data from server)
     private final Set<ChunkCoord> pendingDownloads = Collections.synchronizedSet(new HashSet<>());
     
+    // Re-queue timer for failed uploads (every 30 seconds)
+    private static final long REQUEUE_INTERVAL_MS = 30_000;
+    private long lastRequeueTime = 0;
+    
+    // Debounce map: tracks when chunks were last queued for upload to avoid rapid re-queueing
+    private static final long DEBOUNCE_INTERVAL_MS = 5_000;
+    private final Map<ChunkCoord, Long> recentlyQueuedChunks = new ConcurrentHashMap<>();
+    private static final long DEBOUNCE_CLEANUP_INTERVAL_MS = 60_000;
+    private long lastDebounceCleanupTime = 0;
+    
+    // Periodic save of timestamps (every 5 minutes)
+    private static final long TIMESTAMP_SAVE_INTERVAL_MS = 5 * 60 * 1000;
+    private long lastTimestampSaveTime = 0;
+    
     private ClientSyncManager() {
         uploadLimiter = new RateLimiter(Config.CLIENT_MAX_UPLOAD_PER_SECOND.get());
         downloadLimiter = new RateLimiter(Config.CLIENT_MAX_DOWNLOAD_PER_SECOND.get());
@@ -89,6 +103,9 @@ public class ClientSyncManager {
     }
     
     public void onDisconnect() {
+        // Save timestamps before clearing
+        timestampTracker.save();
+        
         connected = false;
         syncEnabled = false;
         registryComplete = false;
@@ -96,6 +113,7 @@ public class ClientSyncManager {
         uploadQueue.clear();
         downloadQueue.clear();
         pendingDownloads.clear();
+        recentlyQueuedChunks.clear();
         XaeroSync.LOGGER.debug("Disconnected from server");
     }
     
@@ -115,6 +133,16 @@ public class ClientSyncManager {
         uploadLimiter = new RateLimiter(uploadRate);
         downloadLimiter = new RateLimiter(downloadRate);
         
+        // Load persisted local timestamps for this server
+        if (syncEnabled) {
+            String worldId = getWorldId();
+            if (worldId != null) {
+                timestampTracker.loadForWorld(worldId);
+            } else {
+                XaeroSync.LOGGER.warn("World ID not available yet when receiving sync config - timestamps will be loaded later");
+            }
+        }
+        
         XaeroSync.LOGGER.info("Received server config - sync={}, upload={}/s, download={}/s, minInterval={}min",
             syncEnabled, uploadRate, downloadRate, serverMinUpdateIntervalMinutes);
     }
@@ -128,7 +156,19 @@ public class ClientSyncManager {
             return;
         }
         
+        // Try to load timestamps if not already loaded (world ID may not have been available earlier)
+        if (timestampTracker.getCurrentWorldId() == null) {
+            String worldId = getWorldId();
+            if (worldId != null) {
+                timestampTracker.loadForWorld(worldId);
+            } else {
+                XaeroSync.LOGGER.warn("World ID still not available when processing registry batch");
+            }
+        }
+        
         int queuedDownloads = 0;
+        int skippedAutoDownloadDisabled = 0;
+        int skippedAlreadyHave = 0;
         for (S2CRegistryChunkPacket.ChunkEntry entry : packet.getEntries()) {
             ResourceLocation dim = ResourceLocation.tryParse(entry.dimension());
             if (dim == null) continue;
@@ -137,10 +177,21 @@ public class ClientSyncManager {
             timestampTracker.setServerTimestamp(coord, entry.timestamp());
             
             // Check if we need to download this chunk
-            if (Config.CLIENT_AUTO_DOWNLOAD.get() && timestampTracker.needsDownload(coord)) {
+            if (!Config.CLIENT_AUTO_DOWNLOAD.get()) {
+                skippedAutoDownloadDisabled++;
+            } else if (!timestampTracker.needsDownload(coord)) {
+                skippedAlreadyHave++;
+            } else {
                 queueDownload(coord);
                 queuedDownloads++;
             }
+        }
+        
+        if (skippedAutoDownloadDisabled > 0) {
+            XaeroSync.LOGGER.debug("Skipped {} chunks - auto download disabled", skippedAutoDownloadDisabled);
+        }
+        if (skippedAlreadyHave > 0) {
+            XaeroSync.LOGGER.debug("Skipped {} chunks - local version is newer or equal", skippedAlreadyHave);
         }
         
         if (queuedDownloads > 0) {
@@ -199,18 +250,29 @@ public class ClientSyncManager {
     }
     
     public void handleUploadResult(S2CUploadResultPacket packet) {
+        ResourceLocation dim = ResourceLocation.tryParse(packet.getDimension());
+        if (dim == null) return;
+        
+        ChunkCoord coord = new ChunkCoord(dim, packet.getX(), packet.getZ());
+        
         if (packet.isAccepted()) {
-            ResourceLocation dim = ResourceLocation.tryParse(packet.getDimension());
-            if (dim != null) {
-                ChunkCoord coord = new ChunkCoord(dim, packet.getX(), packet.getZ());
-                // Update server timestamp to match what we uploaded
-                Optional<Long> localTs = timestampTracker.getLocalTimestamp(coord);
-                localTs.ifPresent(ts -> timestampTracker.setServerTimestamp(coord, ts));
-            }
+            // Update server timestamp to match what we uploaded
+            Optional<Long> localTs = timestampTracker.getLocalTimestamp(coord);
+            localTs.ifPresent(ts -> timestampTracker.setServerTimestamp(coord, ts));
         } else {
             XaeroSync.LOGGER.debug("Upload rejected for {}:{},{} - {}: {}", 
                 packet.getDimension(), packet.getX(), packet.getZ(), 
                 packet.getResult(), packet.getMessage());
+            
+            // For certain rejection types, update server timestamp to prevent immediate retry
+            S2CUploadResultPacket.Result result = packet.getResult();
+            if (result == S2CUploadResultPacket.Result.REJECTED_OUTDATED ||
+                result == S2CUploadResultPacket.Result.REJECTED_TOO_SOON) {
+                // Server has data that's newer or recent enough - sync timestamps
+                // Set server timestamp to current time so we don't keep trying
+                Optional<Long> localTs = timestampTracker.getLocalTimestamp(coord);
+                localTs.ifPresent(ts -> timestampTracker.setServerTimestamp(coord, ts));
+            }
         }
     }
     
@@ -243,6 +305,13 @@ public class ClientSyncManager {
         }
         
         if (manager.timestampTracker.needsUpload(coord)) {
+            // Debounce: skip if this chunk was recently queued
+            Long lastQueued = manager.recentlyQueuedChunks.get(coord);
+            if (lastQueued != null && (now - lastQueued) < DEBOUNCE_INTERVAL_MS) {
+                return;
+            }
+            
+            manager.recentlyQueuedChunks.put(coord, now);
             manager.queueUpload(coord);
             XaeroSync.LOGGER.debug("Queued chunk {} for upload (queue size: {})", 
                 coord, manager.uploadQueue.size());
@@ -281,6 +350,35 @@ public class ClientSyncManager {
     public void onTick() {
         if (!connected || !syncEnabled) return;
         
+        long now = System.currentTimeMillis();
+        
+        // Periodically clean up old entries from debounce map to prevent memory growth
+        if (now - lastDebounceCleanupTime > DEBOUNCE_CLEANUP_INTERVAL_MS) {
+            lastDebounceCleanupTime = now;
+            recentlyQueuedChunks.entrySet().removeIf(entry -> 
+                (now - entry.getValue()) > DEBOUNCE_INTERVAL_MS);
+        }
+        
+        // Periodically save timestamps to disk to prevent data loss on crash
+        if (now - lastTimestampSaveTime > TIMESTAMP_SAVE_INTERVAL_MS) {
+            lastTimestampSaveTime = now;
+            timestampTracker.save();
+        }
+        
+        // Periodically re-queue chunks that need uploading but aren't in the queue
+        // This handles chunks that failed serialization (e.g., partial chunks) and may be ready now
+        if (registryComplete && Config.CLIENT_AUTO_UPLOAD.get() && uploadQueue.isEmpty()) {
+            if (now - lastRequeueTime > REQUEUE_INTERVAL_MS) {
+                lastRequeueTime = now;
+                int before = uploadQueue.size();
+                queuePendingUploads();
+                int added = uploadQueue.size() - before;
+                if (added > 0) {
+                    XaeroSync.LOGGER.debug("Re-queued {} chunks for upload", added);
+                }
+            }
+        }
+        
         // Process uploads
         while (!uploadQueue.isEmpty() && uploadLimiter.tryAcquire()) {
             ChunkCoord coord = uploadQueue.poll();
@@ -299,6 +397,25 @@ public class ClientSyncManager {
     }
     
     private void processUpload(ChunkCoord coord) {
+        // Check minimum update interval before sending (save bandwidth)
+        long now = System.currentTimeMillis();
+        long minIntervalMs = serverMinUpdateIntervalMinutes * 60 * 1000L;
+        Optional<Long> serverTimestamp = timestampTracker.getServerTimestamp(coord);
+        
+        if (serverTimestamp.isPresent() && (now - serverTimestamp.get()) < minIntervalMs) {
+            // Server would reject this upload - skip it
+            // Update local timestamp to match server so needsUpload() returns false
+            long localTs = timestampTracker.getLocalTimestamp(coord).orElse(now);
+            if (localTs <= serverTimestamp.get()) {
+                // Local is not newer than server, no need to upload
+                return;
+            }
+            // Local is newer but interval not met - will try again later via re-queue
+            XaeroSync.LOGGER.debug("Skipping upload for {} - interval not met ({} min remaining)",
+                coord, (minIntervalMs - (now - serverTimestamp.get())) / 60000);
+            return;
+        }
+        
         // Get the chunk from Xaero's map
         MapTileChunk chunk = getMapTileChunk(coord);
         if (chunk == null) {
@@ -314,7 +431,7 @@ public class ClientSyncManager {
         }
         
         // Get timestamp
-        long timestamp = timestampTracker.getLocalTimestamp(coord).orElse(System.currentTimeMillis());
+        long timestamp = timestampTracker.getLocalTimestamp(coord).orElse(now);
         
         // Send upload packet
         C2SUploadChunkPacket packet = new C2SUploadChunkPacket(
@@ -386,6 +503,17 @@ public class ClientSyncManager {
         return !blacklistedDimensions.contains(dimensionId);
     }
     
+    @Nullable
+    private String getWorldId() {
+        WorldMapSession session = WorldMapSession.getCurrentSession();
+        if (session == null) return null;
+        
+        MapProcessor processor = session.getMapProcessor();
+        if (processor == null) return null;
+        
+        return processor.getCurrentWorldId();
+    }
+    
     // ==================== Getters ====================
     
     public boolean isSyncEnabled() {
@@ -406,6 +534,10 @@ public class ClientSyncManager {
     
     public int getDownloadQueueSize() {
         return downloadQueue.size();
+    }
+    
+    public int getPendingDownloadsSize() {
+        return pendingDownloads.size();
     }
     
     public ClientTimestampTracker getTimestampTracker() {

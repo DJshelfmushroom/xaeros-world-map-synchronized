@@ -68,10 +68,23 @@ public class ChunkSerializer {
     
     /**
      * Serialize a MapTileChunk to compressed byte array.
+     * Returns null if the chunk is not fully loaded (all 4 tiles must be present and loaded).
      */
     @Nullable
     public static byte[] serialize(MapTileChunk chunk, HolderLookup.Provider registryAccess) {
         if (chunk == null) return null;
+        
+        // Check if all 4 tiles are present and loaded - don't sync partial chunks
+        for (int tx = 0; tx < 4; tx++) {
+            for (int tz = 0; tz < 4; tz++) {
+                MapTile tile = chunk.getTile(tx, tz);
+                if (tile == null || !tile.isLoaded()) {
+                    XaeroSync.LOGGER.debug("Skipping chunk ({}, {}) - tile ({}, {}) not ready", 
+                        chunk.getX(), chunk.getZ(), tx, tz);
+                    return null;
+                }
+            }
+        }
         
         try {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();

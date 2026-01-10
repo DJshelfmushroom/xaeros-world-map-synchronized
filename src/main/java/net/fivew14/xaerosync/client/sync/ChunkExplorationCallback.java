@@ -34,11 +34,7 @@ public class ChunkExplorationCallback {
      * Called by the mixin when a chunk tile is explored/updated.
      */
     public static void onChunkExplored(ChunkCoord coord, int tileLocalX, int tileLocalZ, MapProcessor mapProcessor) {
-        XaeroSync.LOGGER.debug("Chunk exploration callback fired for {} (tile {}, {})", 
-            coord, tileLocalX, tileLocalZ);
-        
         if (listeners.isEmpty()) {
-            XaeroSync.LOGGER.debug("No listeners registered for chunk exploration");
             return;
         }
         
