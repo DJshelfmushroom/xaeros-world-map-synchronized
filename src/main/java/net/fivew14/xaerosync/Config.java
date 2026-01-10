@@ -32,11 +32,11 @@ public class Config {
 
         SERVER_MAX_UPLOAD_PER_SECOND = SERVER_BUILDER
                 .comment("Maximum chunks per second the server will accept from a single client")
-                .defineInRange("maxUploadPerSecond", 2, 1, 100);
+                .defineInRange("maxUploadPerSecond", 10, 1, 100);
 
         SERVER_MAX_DOWNLOAD_PER_SECOND = SERVER_BUILDER
                 .comment("Maximum chunks per second the server will send to a single client")
-                .defineInRange("maxDownloadPerSecond", 2, 1, 100);
+                .defineInRange("maxDownloadPerSecond", 10, 1, 100);
 
         SERVER_REGISTRY_BATCH_SIZE = SERVER_BUILDER
                 .comment("Number of chunk entries per registry packet")
@@ -44,7 +44,7 @@ public class Config {
 
         SERVER_REGISTRY_PACKETS_PER_SECOND = SERVER_BUILDER
                 .comment("Registry packets per second during initial sync")
-                .defineInRange("registryPacketsPerSecond", 2, 1, 20);
+                .defineInRange("registryPacketsPerSecond", 3, 1, 20);
 
         SERVER_MAX_CHUNK_DATA_SIZE = SERVER_BUILDER
                 .comment("Maximum chunk data size in bytes (for validation)")
@@ -88,11 +88,11 @@ public class Config {
 
         CLIENT_MAX_UPLOAD_PER_SECOND = CLIENT_BUILDER
                 .comment("Maximum chunks per second to upload")
-                .defineInRange("maxUploadPerSecond", 2, 1, 100);
+                .defineInRange("maxUploadPerSecond", 10, 1, 100);
 
         CLIENT_MAX_DOWNLOAD_PER_SECOND = CLIENT_BUILDER
                 .comment("Maximum chunks per second to request")
-                .defineInRange("maxDownloadPerSecond", 2, 1, 100);
+                .defineInRange("maxDownloadPerSecond", 10, 1, 100);
 
         CLIENT_BUILDER.pop();
     }

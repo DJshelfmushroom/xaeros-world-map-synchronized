@@ -10,6 +10,7 @@ import xaero.map.cache.BlockStateShortShapeCache;
 import xaero.map.region.*;
 
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Applies cached synced chunks to Xaero's loaded regions.
@@ -190,15 +191,15 @@ public class SyncedChunkApplier {
         }
     }
 
+    // Don't overwrite chunks that were updated locally within this time window
+    // This gives Xaero time to write chunks the player is actively exploring
+    private static final long RECENT_UPDATE_THRESHOLD_MS = 90_000; // 1.5 minutes
+    
     /**
      * Apply a single cached chunk to the region.
      * 
-     * We only apply synced data to chunks OUTSIDE Xaero's write distance.
-     * Chunks within write distance can be updated by Xaero automatically,
-     * so we let Xaero handle those and don't overwrite with potentially stale synced data.
-     * 
-     * Note: Minecraft loads chunks in a circle, but Xaero writes in a square.
-     * We use circular distance to match Minecraft's actual loaded chunk pattern.
+     * We skip chunks that were recently updated locally - this means Xaero
+     * is actively writing to them and we shouldn't overwrite.
      */
     private static boolean applyChunk(MapRegion region, ChunkCoord coord, int localX, int localZ) {
         Minecraft mc = Minecraft.getInstance();
@@ -206,30 +207,17 @@ public class SyncedChunkApplier {
             return false;
         }
         
-        // Check if this tile chunk is within Minecraft's circular render distance
-        // We use circular distance because that's how MC actually loads chunks
+        // Check if this chunk was recently updated locally
+        // If so, Xaero is likely still working on it - don't overwrite
+        ClientTimestampTracker tracker = ClientSyncManager.getInstance().getTimestampTracker();
+        Optional<Long> localTimestamp = tracker.getLocalTimestamp(coord);
         
-        int playerChunkX = mc.player.chunkPosition().x;  // MC chunk coords (16-block)
-        int playerChunkZ = mc.player.chunkPosition().z;
-        
-        // Convert our tile chunk coords to MC chunk coords (center of our 4x4 MC chunk area)
-        // Our tile chunk spans MC chunks [coord.x*4, coord.x*4+3], center is at coord.x*4 + 1.5
-        double tileChunkCenterMcX = coord.x() * 4 + 1.5;
-        double tileChunkCenterMcZ = coord.z() * 4 + 1.5;
-        
-        // Distance in MC chunks from player to tile chunk center
-        double dx = tileChunkCenterMcX - playerChunkX;
-        double dz = tileChunkCenterMcZ - playerChunkZ;
-        double distanceSq = dx * dx + dz * dz;
-        
-        // Render distance (in MC chunks) - use as radius for circular check
-        int renderDistance = mc.options.renderDistance().get();
-        double radiusSq = (double) renderDistance * renderDistance;
-        
-        if (distanceSq <= radiusSq) {
-            // Chunk center is within render distance circle - let Xaero handle it
-            XaeroSync.LOGGER.debug("Chunk {} is within render distance, deferring sync", coord);
-            return false;
+        if (localTimestamp.isPresent()) {
+            long timeSinceUpdate = System.currentTimeMillis() - localTimestamp.get();
+            if (timeSinceUpdate < RECENT_UPDATE_THRESHOLD_MS) {
+                XaeroSync.LOGGER.debug("Chunk {} was updated {}ms ago, deferring sync", coord, timeSinceUpdate);
+                return false;
+            }
         }
         
         SyncedChunkCache cache = SyncedChunkCache.getInstance();

@@ -460,10 +460,21 @@ public class ClientSyncManager {
         }
 
         // Process download requests - pick closest chunk to player
+        int downloadsProcessed = 0;
         while (!downloadQueueSet.isEmpty() && downloadLimiter.tryAcquire()) {
             ChunkCoord coord = pollClosest(downloadQueueSet);
             if (coord != null) {
                 requestDownload(coord);
+                downloadsProcessed++;
+            }
+        }
+        
+        // Periodic debug logging of queue state
+        if (now % 5000 < 50) { // Log every ~5 seconds
+            if (!downloadQueueSet.isEmpty() || !pendingDownloads.isEmpty()) {
+                XaeroSync.LOGGER.info("[DEBUG] Download state: queue={}, pending={}, player=({},{})->sync({},{})", 
+                        downloadQueueSet.size(), pendingDownloads.size(),
+                        playerChunkX, playerChunkZ, playerChunkX >> 2, playerChunkZ >> 2);
             }
         }
     }
@@ -493,10 +504,22 @@ public class ClientSyncManager {
         int playerSyncChunkX = playerChunkX >> 2;
         int playerSyncChunkZ = playerChunkZ >> 2;
         
+        // Get current dimension for filtering
+        Minecraft mc = Minecraft.getInstance();
+        ResourceLocation currentDim = mc.level != null ? mc.level.dimension().location() : null;
+        
         for (ChunkCoord coord : set) {
-            int dx = coord.x() - playerSyncChunkX;
-            int dz = coord.z() - playerSyncChunkZ;
-            int distSq = dx * dx + dz * dz;
+            // Only consider chunks in the current dimension for distance calculation
+            // (chunks in other dimensions get MAX_VALUE distance, effectively deprioritized)
+            int distSq;
+            if (currentDim != null && coord.dimension().equals(currentDim)) {
+                int dx = coord.x() - playerSyncChunkX;
+                int dz = coord.z() - playerSyncChunkZ;
+                distSq = dx * dx + dz * dz;
+            } else {
+                distSq = Integer.MAX_VALUE - 1; // Other dimensions are lower priority
+            }
+            
             if (distSq < closestDistSq) {
                 closestDistSq = distSq;
                 closest = coord;
@@ -504,7 +527,10 @@ public class ClientSyncManager {
         }
         
         if (closest != null) {
-            set.remove(closest);
+            boolean removed = set.remove(closest);
+            if (!removed) {
+                XaeroSync.LOGGER.warn("[DEBUG] Failed to remove {} from set! Set size: {}", closest, set.size());
+            }
         }
         return closest;
     }
