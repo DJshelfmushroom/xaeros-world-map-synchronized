@@ -18,7 +18,6 @@ import xaero.map.region.MapTileChunk;
 import javax.annotation.Nullable;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.PriorityBlockingQueue;
 
 /**
  * Main client-side sync manager.
@@ -72,9 +71,19 @@ public class ClientSyncManager {
     private static final long DEBOUNCE_CLEANUP_INTERVAL_MS = 60_000;
     private long lastDebounceCleanupTime = 0;
 
+    // Local timestamp update interval - don't update localTimestamp more often than this
+    // This prevents constant timestamp updates from Xaero's per-tile writeChunk calls
+    // Should match or be close to server's min update interval since we can't upload more often anyway
+    private static final long LOCAL_UPDATE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
     // Periodic save of timestamps (every 5 minutes)
     private static final long TIMESTAMP_SAVE_INTERVAL_MS = 5 * 60 * 1000;
     private long lastTimestampSaveTime = 0;
+
+    // Periodic processing of cached chunks waiting to be applied
+    private static final long CACHE_PROCESS_INTERVAL_MS = 1_000; // Every second
+    private static final int CACHE_PROCESS_MAX_CHUNKS = 5; // Max chunks per tick
+    private long lastCacheProcessTime = 0;
 
     private ClientSyncManager() {
         uploadLimiter = new RateLimiter(Config.CLIENT_MAX_UPLOAD_PER_SECOND.get());
@@ -119,6 +128,7 @@ public class ClientSyncManager {
         downloadQueueSet.clear();
         pendingDownloads.clear();
         recentlyQueuedChunks.clear();
+        SyncedChunkCache.getInstance().clear();
         XaeroSync.LOGGER.debug("Disconnected from server");
     }
 
@@ -143,6 +153,7 @@ public class ClientSyncManager {
             String worldId = getWorldId();
             if (worldId != null) {
                 timestampTracker.loadForWorld(worldId);
+                SyncedChunkCache.getInstance().initForWorld(worldId);
             } else {
                 XaeroSync.LOGGER.warn("World ID not available yet when receiving sync config - timestamps will be loaded later");
             }
@@ -166,6 +177,7 @@ public class ClientSyncManager {
             String worldId = getWorldId();
             if (worldId != null) {
                 timestampTracker.loadForWorld(worldId);
+                SyncedChunkCache.getInstance().initForWorld(worldId);
             } else {
                 XaeroSync.LOGGER.warn("World ID still not available when processing registry batch");
             }
@@ -216,22 +228,43 @@ public class ClientSyncManager {
     }
 
     public void handleRegistryUpdate(S2CRegistryUpdatePacket packet) {
-        if (!syncEnabled) return;
+        XaeroSync.LOGGER.info("Received registry update: dim={}, x={}, z={}, ts={}, syncEnabled={}",
+                packet.getDimension(), packet.getX(), packet.getZ(), packet.getTimestamp(), syncEnabled);
+        
+        if (!syncEnabled) {
+            XaeroSync.LOGGER.warn("Ignoring registry update - sync not enabled");
+            return;
+        }
 
         ResourceLocation dim = ResourceLocation.tryParse(packet.getDimension());
-        if (dim == null) return;
+        if (dim == null) {
+            XaeroSync.LOGGER.warn("Failed to parse dimension: {}", packet.getDimension());
+            return;
+        }
 
         ChunkCoord coord = new ChunkCoord(dim, packet.getX(), packet.getZ());
         timestampTracker.setServerTimestamp(coord, packet.getTimestamp());
 
         // Check if we need to download this chunk
-        if (Config.CLIENT_AUTO_DOWNLOAD.get() && timestampTracker.needsDownload(coord)) {
+        boolean autoDownload = Config.CLIENT_AUTO_DOWNLOAD.get();
+        Optional<Long> localTs = timestampTracker.getLocalTimestamp(coord);
+        Optional<Long> serverTs = timestampTracker.getServerTimestamp(coord);
+        boolean needsDownload = timestampTracker.needsDownload(coord);
+        
+        XaeroSync.LOGGER.info("Registry update for {}: autoDownload={}, needsDownload={}, localTs={}, serverTs={}, inPending={}, inQueue={}", 
+                coord, autoDownload, needsDownload, 
+                localTs.orElse(null), serverTs.orElse(null),
+                pendingDownloads.contains(coord), downloadQueueSet.contains(coord));
+        
+        if (autoDownload && needsDownload) {
             queueDownload(coord);
+            XaeroSync.LOGGER.info("Queued chunk {} for download from registry update (queue size now: {})", 
+                    coord, downloadQueueSet.size());
         }
     }
 
     public void handleChunkData(S2CChunkDataPacket packet) {
-        XaeroSync.LOGGER.info("Received chunk data for {}:{},{} ({} bytes)",
+        XaeroSync.LOGGER.debug("Received chunk data for {}:{},{} ({} bytes)",
                 packet.getDimension(), packet.getX(), packet.getZ(), packet.getData().length);
 
         if (!syncEnabled) return;
@@ -242,16 +275,15 @@ public class ClientSyncManager {
         ChunkCoord coord = new ChunkCoord(dim, packet.getX(), packet.getZ());
         pendingDownloads.remove(coord);
 
-        // Deserialize and insert into Xaero's map
-        boolean success = ChunkInserter.insertChunk(coord, packet.getData(), packet.getTimestamp());
-
-        if (success) {
-            // Update local timestamp
-            timestampTracker.setLocalTimestamp(coord, packet.getTimestamp());
-            XaeroSync.LOGGER.info("Inserted chunk {} into map", coord);
-        } else {
-            XaeroSync.LOGGER.warn("Failed to insert chunk {} into map", coord);
-        }
+        // Store in cache - the mixin will apply it when Xaero loads the region
+        SyncedChunkCache.getInstance().store(coord, packet.getData(), packet.getTimestamp());
+        timestampTracker.setLocalTimestamp(coord, packet.getTimestamp());
+        
+        // Try to apply immediately if region is already loaded
+        // (The MapSaveLoadMixin will handle it if region loads later)
+        SyncedChunkApplier.tryApplyChunk(coord);
+        
+        XaeroSync.LOGGER.debug("Cached chunk {} for application", coord);
     }
 
     public void handleUploadResult(S2CUploadResultPacket packet) {
@@ -295,6 +327,17 @@ public class ClientSyncManager {
         }
 
         long now = System.currentTimeMillis();
+
+        // Throttle local timestamp updates - only update if:
+        // 1. Chunk has no local timestamp yet (first exploration), OR
+        // 2. Enough time has passed since last local update
+        Optional<Long> existingLocalTs = manager.timestampTracker.getLocalTimestamp(coord);
+        if (existingLocalTs.isPresent() && (now - existingLocalTs.get()) < LOCAL_UPDATE_INTERVAL_MS) {
+            // Recently updated locally - skip this update entirely
+            return;
+        }
+
+        // Update local timestamp
         manager.timestampTracker.setLocalTimestamp(coord, now);
 
         if (!manager.registryComplete) {
@@ -330,19 +373,35 @@ public class ClientSyncManager {
     }
 
     private void queueDownload(ChunkCoord coord) {
-        if (!pendingDownloads.contains(coord)) {
-            downloadQueueSet.add(coord);
+        if (pendingDownloads.contains(coord)) {
+            XaeroSync.LOGGER.debug("Not queueing {} - already in pendingDownloads", coord);
+            return;
         }
+        boolean added = downloadQueueSet.add(coord);
+        XaeroSync.LOGGER.debug("queueDownload({}) - added={}, queue size now={}", coord, added, downloadQueueSet.size());
     }
 
     private void queuePendingUploads() {
         Map<ChunkCoord, Long> needUpload = timestampTracker.getChunksNeedingUpload();
+        int queued = 0;
+        int skippedNotLoaded = 0;
         for (ChunkCoord coord : needUpload.keySet()) {
-            if (isDimensionAllowed(coord.dimension().toString())) {
+            if (!isDimensionAllowed(coord.dimension().toString())) {
+                continue;
+            }
+            // Only queue chunks that actually exist in Xaero's map
+            // Chunks from previous sessions may not be loaded in memory
+            if (getMapTileChunk(coord) != null) {
                 queueUpload(coord);
+                queued++;
+            } else {
+                skippedNotLoaded++;
             }
         }
-        XaeroSync.LOGGER.info("Queued {} chunks for upload", needUpload.size());
+        if (queued > 0 || skippedNotLoaded > 0) {
+            XaeroSync.LOGGER.info("Queued {} chunks for upload ({} skipped - not loaded in map)", 
+                    queued, skippedNotLoaded);
+        }
     }
 
     // ==================== Tick Processing ====================
@@ -366,6 +425,13 @@ public class ClientSyncManager {
         if (now - lastTimestampSaveTime > TIMESTAMP_SAVE_INTERVAL_MS) {
             lastTimestampSaveTime = now;
             timestampTracker.save();
+        }
+
+        // Periodically process cached chunks waiting to be applied
+        // This handles chunks whose regions became ready without triggering the mixin
+        if (now - lastCacheProcessTime > CACHE_PROCESS_INTERVAL_MS) {
+            lastCacheProcessTime = now;
+            SyncedChunkApplier.processPendingChunks(CACHE_PROCESS_MAX_CHUNKS);
         }
 
         // Periodically re-queue chunks that need uploading but aren't in the queue
@@ -473,7 +539,9 @@ public class ClientSyncManager {
         // Serialize
         byte[] data = ChunkSerializer.serialize(chunk, Minecraft.getInstance().level.registryAccess());
         if (data == null) {
-            XaeroSync.LOGGER.warn("Failed to serialize chunk {}", coord);
+            // Not a warning - this happens when tiles aren't fully loaded yet
+            // The chunk will be re-queued later via periodic queuePendingUploads
+            XaeroSync.LOGGER.debug("Chunk {} not ready for serialization", coord);
             return;
         }
 
@@ -585,6 +653,10 @@ public class ClientSyncManager {
 
     public int getPendingDownloadsSize() {
         return pendingDownloads.size();
+    }
+
+    public int getCachedChunksCount() {
+        return SyncedChunkCache.getInstance().getCachedCount();
     }
 
     public ClientTimestampTracker getTimestampTracker() {

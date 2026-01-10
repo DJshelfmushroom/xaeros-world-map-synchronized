@@ -84,6 +84,31 @@ public class ServerSyncManager {
             return;
         }
 
+        // Initialize sync for this player
+        initializeSyncForPlayer(player);
+        
+        // On LAN: when sync becomes active (2nd player joins), also initialize 
+        // sync for any existing players who weren't syncing yet
+        if (!server.isDedicatedServer()) {
+            for (ServerPlayer existingPlayer : server.getPlayerList().getPlayers()) {
+                if (!existingPlayer.getUUID().equals(player.getUUID()) && 
+                    !playerStates.containsKey(existingPlayer.getUUID())) {
+                    XaeroSync.LOGGER.info("Retroactively initializing sync for existing player {}", 
+                            existingPlayer.getName().getString());
+                    initializeSyncForPlayer(existingPlayer);
+                }
+            }
+        }
+    }
+    
+    /**
+     * Initialize sync state and send registry to a player.
+     */
+    private void initializeSyncForPlayer(ServerPlayer player) {
+        if (playerStates.containsKey(player.getUUID())) {
+            return; // Already initialized
+        }
+        
         // Create player state
         PlayerSyncState state = new PlayerSyncState(
                 player,
@@ -98,7 +123,7 @@ public class ServerSyncManager {
         // Start registry transfer
         startRegistryTransfer(player, state);
 
-        XaeroSync.LOGGER.info("Player {} joined, starting sync (registry size: {})",
+        XaeroSync.LOGGER.info("Player {} initialized for sync (registry size: {})",
                 player.getName().getString(), registry.size());
     }
 
@@ -376,11 +401,14 @@ public class ServerSyncManager {
                 timestamp
         );
 
+        int sentCount = 0;
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             if (!player.getUUID().equals(excludePlayer) && playerStates.containsKey(player.getUUID())) {
                 XaeroSyncNetworking.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), packet);
+                sentCount++;
             }
         }
+        XaeroSync.LOGGER.debug("Broadcast registry update for {} to {} other players", coord, sentCount);
     }
 
     private void invalidateRegistryCache() {

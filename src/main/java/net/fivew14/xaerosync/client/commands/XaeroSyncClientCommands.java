@@ -72,6 +72,7 @@ public class XaeroSyncClientCommands {
         source.sendSuccess(() -> Component.literal("Upload Queue Size: " + manager.getUploadQueueSize()), false);
         source.sendSuccess(() -> Component.literal("Download Queue Size: " + manager.getDownloadQueueSize()), false);
         source.sendSuccess(() -> Component.literal("Pending Downloads: " + manager.getPendingDownloadsSize()), false);
+        source.sendSuccess(() -> Component.literal("Cached Chunks: " + manager.getCachedChunksCount()), false);
 
         ClientTimestampTracker tracker = manager.getTimestampTracker();
         int needingUpload = tracker.getChunksNeedingUpload().size();
