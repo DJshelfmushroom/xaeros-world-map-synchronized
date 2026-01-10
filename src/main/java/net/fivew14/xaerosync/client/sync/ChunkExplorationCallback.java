@@ -34,11 +34,11 @@ public class ChunkExplorationCallback {
      * Called by the mixin when a chunk tile is explored/updated.
      */
     public static void onChunkExplored(ChunkCoord coord, int tileLocalX, int tileLocalZ, MapProcessor mapProcessor) {
-        XaeroSync.LOGGER.debug("XaeroSync: Chunk exploration callback fired for {} (tile {}, {})", 
+        XaeroSync.LOGGER.debug("Chunk exploration callback fired for {} (tile {}, {})", 
             coord, tileLocalX, tileLocalZ);
         
         if (listeners.isEmpty()) {
-            XaeroSync.LOGGER.debug("XaeroSync: No listeners registered for chunk exploration");
+            XaeroSync.LOGGER.debug("No listeners registered for chunk exploration");
             return;
         }
         
@@ -47,7 +47,7 @@ public class ChunkExplorationCallback {
             try {
                 listener.accept(event);
             } catch (Exception e) {
-                XaeroSync.LOGGER.error("XaeroSync: Error in chunk exploration listener", e);
+                XaeroSync.LOGGER.error("Error in chunk exploration listener", e);
             }
         }
     }

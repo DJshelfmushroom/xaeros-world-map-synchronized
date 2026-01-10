@@ -184,8 +184,32 @@ public class ChunkInserter {
                     false // cave mode - we're doing surface
                 );
                 
-                // Note: Overlays would need special handling via Xaero's internal APIs
-                // For now we skip overlay restoration as it requires accessing protected methods
+                // Restore overlays (water, ice, glass, etc.)
+                // The write() method clears overlays if the list is empty, so we add them after
+                if (deserializedBlock.overlays() != null && !deserializedBlock.overlays().isEmpty()) {
+                    for (ChunkSerializer.DeserializedOverlay deserializedOverlay : deserializedBlock.overlays()) {
+                        if (deserializedOverlay.state() == null) continue;
+                        
+                        // Create new Overlay with the deserialized data
+                        Overlay overlay = new Overlay(
+                            deserializedOverlay.state(),
+                            deserializedOverlay.light(),
+                            deserializedOverlay.glowing()
+                        );
+                        
+                        // Set opacity (Overlay starts at 0, we need to increase it)
+                        if (deserializedOverlay.opacity() > 0) {
+                            overlay.increaseOpacity(deserializedOverlay.opacity());
+                        }
+                        
+                        block.addOverlay(overlay);
+                    }
+                }
+                
+                // Also restore slope data
+                block.setVerticalSlope(deserializedBlock.verticalSlope());
+                block.setDiagonalSlope(deserializedBlock.diagonalSlope());
+                block.setSlopeUnknown(false);
             }
         }
     }

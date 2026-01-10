@@ -33,7 +33,7 @@ import java.util.zip.GZIPOutputStream;
  */
 public class ChunkSerializer {
     
-    private static final byte CURRENT_VERSION = 1;
+    private static final byte CURRENT_VERSION = 2;
     
     // Reflection for accessing protected fields in MapPixel
     private static Field lightField;
@@ -233,6 +233,7 @@ public class ChunkSerializer {
                     writeVarInt(dos, blockPalette.getOrDefault(overlayState, -1));
                 }
                 dos.writeByte(getLight(overlay));
+                dos.writeBoolean(isGlowing(overlay));
                 dos.writeByte((byte) overlay.getOpacity());
             }
         }
@@ -251,7 +252,7 @@ public class ChunkSerializer {
                  DataInputStream dis = new DataInputStream(gzip)) {
                 
                 byte version = dis.readByte();
-                if (version != CURRENT_VERSION) {
+                if (version < 1 || version > CURRENT_VERSION) {
                     XaeroSync.LOGGER.warn("Unknown chunk serialization version: {}", version);
                     return null;
                 }
@@ -281,7 +282,7 @@ public class ChunkSerializer {
                         DeserializedBlock[][] blocks = new DeserializedBlock[16][16];
                         for (int x = 0; x < 16; x++) {
                             for (int z = 0; z < 16; z++) {
-                                blocks[x][z] = deserializeBlock(dis, blockPalette, biomePalette);
+                                blocks[x][z] = deserializeBlock(dis, version, blockPalette, biomePalette);
                             }
                         }
                         
@@ -327,6 +328,7 @@ public class ChunkSerializer {
     
     @Nullable
     private static DeserializedBlock deserializeBlock(DataInputStream dis,
+                                                       byte version,
                                                        List<BlockState> blockPalette,
                                                        List<ResourceKey<Biome>> biomePalette) throws IOException {
         byte present = dis.readByte();
@@ -354,8 +356,10 @@ public class ChunkSerializer {
             BlockState overlayState = overlayStateIdx >= 0 && overlayStateIdx < blockPalette.size() 
                 ? blockPalette.get(overlayStateIdx) : null;
             byte overlayLight = dis.readByte();
+            // Version 2+ includes glowing for overlays
+            boolean overlayGlowing = version >= 2 ? dis.readBoolean() : false;
             byte overlayOpacity = dis.readByte();
-            overlays.add(new DeserializedOverlay(overlayState, overlayLight, overlayOpacity));
+            overlays.add(new DeserializedOverlay(overlayState, overlayLight, overlayGlowing, overlayOpacity));
         }
         
         return new DeserializedBlock(state, height, topHeight, light, glowing, 
@@ -410,6 +414,7 @@ public class ChunkSerializer {
     public record DeserializedOverlay(
         BlockState state,
         byte light,
+        boolean glowing,
         byte opacity
     ) {}
 }

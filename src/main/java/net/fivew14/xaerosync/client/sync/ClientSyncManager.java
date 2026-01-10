@@ -85,7 +85,7 @@ public class ClientSyncManager {
         uploadQueue.clear();
         downloadQueue.clear();
         pendingDownloads.clear();
-        XaeroSync.LOGGER.debug("XaeroSync: Connected to server");
+        XaeroSync.LOGGER.debug("Connected to server");
     }
     
     public void onDisconnect() {
@@ -96,7 +96,7 @@ public class ClientSyncManager {
         uploadQueue.clear();
         downloadQueue.clear();
         pendingDownloads.clear();
-        XaeroSync.LOGGER.debug("XaeroSync: Disconnected from server");
+        XaeroSync.LOGGER.debug("Disconnected from server");
     }
     
     // ==================== Packet Handlers ====================
@@ -115,16 +115,16 @@ public class ClientSyncManager {
         uploadLimiter = new RateLimiter(uploadRate);
         downloadLimiter = new RateLimiter(downloadRate);
         
-        XaeroSync.LOGGER.info("XaeroSync: Received server config - sync={}, upload={}/s, download={}/s, minInterval={}min",
+        XaeroSync.LOGGER.info("Received server config - sync={}, upload={}/s, download={}/s, minInterval={}min",
             syncEnabled, uploadRate, downloadRate, serverMinUpdateIntervalMinutes);
     }
     
     public void handleRegistryChunk(S2CRegistryChunkPacket packet) {
-        XaeroSync.LOGGER.info("XaeroSync: Received registry batch {}/{} with {} entries (syncEnabled={})",
+        XaeroSync.LOGGER.info("Received registry batch {}/{} with {} entries (syncEnabled={})",
             packet.getBatchIndex() + 1, packet.getTotalBatches(), packet.getEntries().size(), syncEnabled);
         
         if (!syncEnabled) {
-            XaeroSync.LOGGER.warn("XaeroSync: Ignoring registry - sync not enabled");
+            XaeroSync.LOGGER.warn("Ignoring registry - sync not enabled");
             return;
         }
         
@@ -144,12 +144,12 @@ public class ClientSyncManager {
         }
         
         if (queuedDownloads > 0) {
-            XaeroSync.LOGGER.info("XaeroSync: Queued {} chunks for download from batch", queuedDownloads);
+            XaeroSync.LOGGER.info("Queued {} chunks for download from batch", queuedDownloads);
         }
         
         if (packet.isLastBatch()) {
             registryComplete = true;
-            XaeroSync.LOGGER.info("XaeroSync: Registry transfer complete - {} server chunks, download queue: {}", 
+            XaeroSync.LOGGER.info("Registry transfer complete - {} server chunks, download queue: {}", 
                 timestampTracker.getServerCount(), downloadQueue.size());
             
             // Check for chunks that need uploading
@@ -175,7 +175,7 @@ public class ClientSyncManager {
     }
     
     public void handleChunkData(S2CChunkDataPacket packet) {
-        XaeroSync.LOGGER.info("XaeroSync: Received chunk data for {}:{},{} ({} bytes)",
+        XaeroSync.LOGGER.info("Received chunk data for {}:{},{} ({} bytes)",
             packet.getDimension(), packet.getX(), packet.getZ(), packet.getData().length);
         
         if (!syncEnabled) return;
@@ -192,9 +192,9 @@ public class ClientSyncManager {
         if (success) {
             // Update local timestamp
             timestampTracker.setLocalTimestamp(coord, packet.getTimestamp());
-            XaeroSync.LOGGER.info("XaeroSync: Inserted chunk {} into map", coord);
+            XaeroSync.LOGGER.info("Inserted chunk {} into map", coord);
         } else {
-            XaeroSync.LOGGER.warn("XaeroSync: Failed to insert chunk {} into map", coord);
+            XaeroSync.LOGGER.warn("Failed to insert chunk {} into map", coord);
         }
     }
     
@@ -208,7 +208,7 @@ public class ClientSyncManager {
                 localTs.ifPresent(ts -> timestampTracker.setServerTimestamp(coord, ts));
             }
         } else {
-            XaeroSync.LOGGER.debug("XaeroSync: Upload rejected for {}:{},{} - {}: {}", 
+            XaeroSync.LOGGER.debug("Upload rejected for {}:{},{} - {}: {}", 
                 packet.getDimension(), packet.getX(), packet.getZ(), 
                 packet.getResult(), packet.getMessage());
         }
@@ -244,7 +244,7 @@ public class ClientSyncManager {
         
         if (manager.timestampTracker.needsUpload(coord)) {
             manager.queueUpload(coord);
-            XaeroSync.LOGGER.debug("XaeroSync: Queued chunk {} for upload (queue size: {})", 
+            XaeroSync.LOGGER.debug("Queued chunk {} for upload (queue size: {})", 
                 coord, manager.uploadQueue.size());
         }
     }
@@ -270,7 +270,7 @@ public class ClientSyncManager {
                 queueUpload(coord);
             }
         }
-        XaeroSync.LOGGER.info("XaeroSync: Queued {} chunks for upload", needUpload.size());
+        XaeroSync.LOGGER.info("Queued {} chunks for upload", needUpload.size());
     }
     
     // ==================== Tick Processing ====================
@@ -302,14 +302,14 @@ public class ClientSyncManager {
         // Get the chunk from Xaero's map
         MapTileChunk chunk = getMapTileChunk(coord);
         if (chunk == null) {
-            XaeroSync.LOGGER.debug("XaeroSync: Chunk {} not found for upload", coord);
+            XaeroSync.LOGGER.debug("Chunk {} not found for upload", coord);
             return;
         }
         
         // Serialize
         byte[] data = ChunkSerializer.serialize(chunk, Minecraft.getInstance().level.registryAccess());
         if (data == null) {
-            XaeroSync.LOGGER.warn("XaeroSync: Failed to serialize chunk {}", coord);
+            XaeroSync.LOGGER.warn("Failed to serialize chunk {}", coord);
             return;
         }
         
@@ -326,7 +326,7 @@ public class ClientSyncManager {
         );
         XaeroSyncNetworking.CHANNEL.send(PacketDistributor.SERVER.noArg(), packet);
         
-        XaeroSync.LOGGER.debug("XaeroSync: Uploading chunk {} ({} bytes)", coord, data.length);
+        XaeroSync.LOGGER.debug("Uploading chunk {} ({} bytes)", coord, data.length);
     }
     
     private void requestDownload(ChunkCoord coord) {
@@ -341,7 +341,7 @@ public class ClientSyncManager {
         ));
         XaeroSyncNetworking.CHANNEL.send(PacketDistributor.SERVER.noArg(), packet);
         
-        XaeroSync.LOGGER.debug("XaeroSync: Requesting chunk {}", coord);
+        XaeroSync.LOGGER.debug("Requesting chunk {}", coord);
     }
     
     // ==================== Helpers ====================

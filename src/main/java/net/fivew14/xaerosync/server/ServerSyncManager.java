@@ -44,9 +44,9 @@ public class ServerSyncManager {
         try {
             storage.initialize();
             storage.scanIntoRegistry(registry);
-            XaeroSync.LOGGER.info("XaeroSync: Loaded {} chunks from storage", registry.size());
+            XaeroSync.LOGGER.info("Loaded {} chunks from storage", registry.size());
         } catch (IOException e) {
-            XaeroSync.LOGGER.error("XaeroSync: Failed to initialize storage", e);
+            XaeroSync.LOGGER.error("Failed to initialize storage", e);
         }
     }
     
@@ -69,17 +69,17 @@ public class ServerSyncManager {
      * Called when a player joins the server.
      */
     public void onPlayerJoin(ServerPlayer player) {
-        XaeroSync.LOGGER.info("XaeroSync: onPlayerJoin called for {} (syncEnabled={}, shouldBeActive={})",
+        XaeroSync.LOGGER.info("onPlayerJoin called for {} (syncEnabled={}, shouldBeActive={})",
             player.getName().getString(), Config.SERVER_SYNC_ENABLED.get(), shouldSyncBeActive());
         
         if (!Config.SERVER_SYNC_ENABLED.get()) {
-            XaeroSync.LOGGER.info("XaeroSync: Sync disabled in config, skipping");
+            XaeroSync.LOGGER.info("Sync disabled in config, skipping");
             return;
         }
         
         // Check if sync should be active (dedicated server or 2+ players on LAN)
         if (!shouldSyncBeActive()) {
-            XaeroSync.LOGGER.info("XaeroSync: Sync not active (dedicated={}, playerCount={})",
+            XaeroSync.LOGGER.info("Sync not active (dedicated={}, playerCount={})",
                 server.isDedicatedServer(), server.getPlayerCount());
             return;
         }
@@ -98,7 +98,7 @@ public class ServerSyncManager {
         // Start registry transfer
         startRegistryTransfer(player, state);
         
-        XaeroSync.LOGGER.info("XaeroSync: Player {} joined, starting sync (registry size: {})", 
+        XaeroSync.LOGGER.info("Player {} joined, starting sync (registry size: {})", 
             player.getName().getString(), registry.size());
     }
     
@@ -107,7 +107,7 @@ public class ServerSyncManager {
      */
     public void onPlayerLeave(ServerPlayer player) {
         playerStates.remove(player.getUUID());
-        XaeroSync.LOGGER.debug("XaeroSync: Player {} left, removed sync state", player.getName().getString());
+        XaeroSync.LOGGER.debug("Player {} left, removed sync state", player.getName().getString());
     }
     
     /**
@@ -159,7 +159,7 @@ public class ServerSyncManager {
             blacklist
         );
         
-        XaeroSync.LOGGER.info("XaeroSync: Sending config packet to {} (syncEnabled={}, upload={}/s, download={}/s, minInterval={}min)",
+        XaeroSync.LOGGER.info("Sending config packet to {} (syncEnabled={}, upload={}/s, download={}/s, minInterval={}min)",
             player.getName().getString(), packet.isSyncEnabled(), 
             packet.getMaxUploadPerSecond(), packet.getMaxDownloadPerSecond(), packet.getMinUpdateIntervalMinutes());
         

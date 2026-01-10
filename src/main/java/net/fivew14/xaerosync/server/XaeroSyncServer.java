@@ -39,13 +39,13 @@ public class XaeroSyncServer {
         @SubscribeEvent
         public void onServerStarted(ServerStartedEvent event) {
             ServerSyncManager.init(event.getServer());
-            XaeroSync.LOGGER.info("XaeroSync: Server sync manager started");
+            XaeroSync.LOGGER.info("Server sync manager started");
         }
         
         @SubscribeEvent
         public void onServerStopping(ServerStoppingEvent event) {
             ServerSyncManager.shutdown();
-            XaeroSync.LOGGER.info("XaeroSync: Server sync manager stopped");
+            XaeroSync.LOGGER.info("Server sync manager stopped");
         }
         
         @SubscribeEvent
@@ -81,7 +81,7 @@ public class XaeroSyncServer {
         @SubscribeEvent
         public void onRegisterCommands(RegisterCommandsEvent event) {
             XaeroSyncCommands.register(event.getDispatcher());
-            XaeroSync.LOGGER.info("XaeroSync: Registered admin commands");
+            XaeroSync.LOGGER.info("Registered admin commands");
         }
     }
     

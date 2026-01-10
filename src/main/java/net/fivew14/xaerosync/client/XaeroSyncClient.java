@@ -36,13 +36,13 @@ public class XaeroSyncClient {
         
         @SubscribeEvent
         public void onClientPlayerLogin(ClientPlayerNetworkEvent.LoggingIn event) {
-            XaeroSync.LOGGER.info("XaeroSync: Client player logging in");
+            XaeroSync.LOGGER.info("Client player logging in");
             ClientSyncManager.getInstance().onConnect();
         }
         
         @SubscribeEvent
         public void onClientPlayerLogout(ClientPlayerNetworkEvent.LoggingOut event) {
-            XaeroSync.LOGGER.info("XaeroSync: Client player logging out");
+            XaeroSync.LOGGER.info("Client player logging out");
             ClientSyncManager.getInstance().onDisconnect();
         }
         
@@ -56,7 +56,7 @@ public class XaeroSyncClient {
         @SubscribeEvent
         public void onRegisterClientCommands(RegisterClientCommandsEvent event) {
             XaeroSyncClientCommands.register(event.getDispatcher());
-            XaeroSync.LOGGER.info("XaeroSync: Registered client commands");
+            XaeroSync.LOGGER.info("Registered client commands");
         }
     }
 }
