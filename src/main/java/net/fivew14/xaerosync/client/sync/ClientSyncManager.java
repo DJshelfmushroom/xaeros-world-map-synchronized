@@ -69,10 +69,6 @@ public class ClientSyncManager {
     // Periodic save of timestamps (every 5 minutes)
     private static final long TIMESTAMP_SAVE_INTERVAL_MS = 5 * 60 * 1000;
 
-    // Periodic processing of cached chunks waiting to be applied
-    private static final long CACHE_PROCESS_INTERVAL_MS = 1_000; // Every second
-    private static final int CACHE_PROCESS_MAX_CHUNKS = 5; // Max chunks per tick
-
     // Re-queue timer for failed uploads (every 30 seconds)
     private static final long REQUEUE_INTERVAL_MS = 30_000;
 
@@ -93,7 +89,6 @@ public class ClientSyncManager {
     private static final int RESORT_QUEUE_SIZE_CHANGE_THRESHOLD = 10; // Resort if queue size changes by 10+
 
     private long lastTimestampSaveTime = 0;
-    private long lastCacheProcessTime = 0;
     private long lastDebounceCleanupTime = 0;
     private long lastRequeueTime = 0;
 
@@ -454,12 +449,9 @@ public class ClientSyncManager {
             timestampTracker.save();
         }
 
-        // Periodically process cached chunks waiting to be applied
+        // Process cached chunks waiting to be applied every tick (max 1 per tick)
         // This handles chunks whose regions became ready without triggering the mixin
-        if (now - lastCacheProcessTime > CACHE_PROCESS_INTERVAL_MS) {
-            lastCacheProcessTime = now;
-            SyncedChunkApplier.processPendingChunks(CACHE_PROCESS_MAX_CHUNKS);
-        }
+        SyncedChunkApplier.processPendingChunks(1);
 
         // Periodically re-queue chunks that need uploading but aren't in the queue
         // This handles chunks that failed serialization (e.g., partial chunks) and may be ready now
