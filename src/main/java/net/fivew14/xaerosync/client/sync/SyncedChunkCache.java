@@ -85,6 +85,7 @@ public class SyncedChunkCache {
 
         currentWorldId = worldId;
         cachedChunks.clear();
+        deserializedCache.clear();
 
         // Scan cache directory to build index
         Path cacheDir = getCacheDir();
