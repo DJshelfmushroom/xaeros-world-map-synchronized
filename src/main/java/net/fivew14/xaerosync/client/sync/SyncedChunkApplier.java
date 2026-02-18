@@ -9,6 +9,7 @@ import xaero.map.WorldMapSession;
 import xaero.map.cache.BlockStateShortShapeCache;
 import xaero.map.region.*;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -86,6 +87,8 @@ public class SyncedChunkApplier {
      * <p>
      * IMPORTANT: We never force regions to loaded state or create regions ourselves.
      * This ensures we don't interfere with Xaero's normal map generation.
+     * <p>
+     * Chunks are prioritized by distance to the player - closest chunks are applied first.
      *
      * @param maxChunks Maximum number of chunks to process per call (to avoid lag)
      * @return Number of chunks successfully applied
@@ -102,8 +105,43 @@ public class SyncedChunkApplier {
         MapProcessor processor = session.getMapProcessor();
         if (processor == null) return 0;
 
+        // Get player position for distance-based prioritization
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null) return 0;
+
+        int playerChunkX = mc.player.chunkPosition().x >> 2; // Convert to Xaero's 64-block chunks
+        int playerChunkZ = mc.player.chunkPosition().z >> 2;
+        ResourceLocation currentDim = mc.level != null ? mc.level.dimension().location() : null;
+
+        // Sort cached chunks by distance to player
+        List<ChunkCoord> sortedCoords = new ArrayList<>(cache.getCachedCoords());
+        sortedCoords.sort((c1, c2) -> {
+            // Prioritize chunks in the current dimension
+            boolean c1InCurrentDim = c1.dimension().equals(currentDim);
+            boolean c2InCurrentDim = c2.dimension().equals(currentDim);
+
+            if (c1InCurrentDim != c2InCurrentDim) {
+                return c1InCurrentDim ? -1 : 1; // Current dimension first
+            }
+
+            if (!c1InCurrentDim) {
+                return 0; // Both in other dimensions, don't bother sorting by distance
+            }
+
+            // Both in current dimension - sort by distance
+            int dx1 = c1.x() - playerChunkX;
+            int dz1 = c1.z() - playerChunkZ;
+            int distSq1 = dx1 * dx1 + dz1 * dz1;
+
+            int dx2 = c2.x() - playerChunkX;
+            int dz2 = c2.z() - playerChunkZ;
+            int distSq2 = dx2 * dx2 + dz2 * dz2;
+
+            return Integer.compare(distSq1, distSq2);
+        });
+
         int applied = 0;
-        for (ChunkCoord coord : cache.getCachedCoords()) {
+        for (ChunkCoord coord : sortedCoords) {
             if (applied >= maxChunks) break;
 
             // Only get existing region - don't create one
