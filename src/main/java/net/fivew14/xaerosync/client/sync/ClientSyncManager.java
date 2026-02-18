@@ -70,8 +70,9 @@ public class ClientSyncManager {
     private static final long TIMESTAMP_SAVE_INTERVAL_MS = 5 * 60 * 1000;
 
     // Periodic processing of cached chunks waiting to be applied
-    private static final long CACHE_PROCESS_INTERVAL_MS = 1_000; // Every second
-    private static final int CACHE_PROCESS_MAX_CHUNKS = 5; // Max chunks per tick
+    // Run more frequently with smaller batches to avoid frame rate stutters
+    private static final long CACHE_PROCESS_INTERVAL_MS = 50; // Every 50ms (1 tick = 50ms)
+    private static final int CACHE_PROCESS_MAX_CHUNKS = 1; // Max chunks per call
 
     // Re-queue timer for failed uploads (every 30 seconds)
     private static final long REQUEUE_INTERVAL_MS = 30_000;
@@ -287,9 +288,8 @@ public class ClientSyncManager {
         SyncedChunkCache.getInstance().store(coord, packet.getData(), packet.getTimestamp(), mc.level.registryAccess());
         timestampTracker.setLocalTimestamp(coord, packet.getTimestamp());
 
-        // Try to apply immediately if region is already loaded
-        // (The MapSaveLoadMixin will handle it if region loads later)
-        SyncedChunkApplier.tryApplyChunk(coord);
+        // Let background deserialization finish and apply via periodic processPendingChunks()
+        // This avoids bursts of chunk applications in a single frame
 
         XaeroSync.LOGGER.debug("Cached chunk {} for application", coord);
     }
