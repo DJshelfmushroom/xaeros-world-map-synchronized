@@ -3,24 +3,31 @@ package net.fivew14.xaerosync.client.sync;
 import net.fivew14.xaerosync.XaeroSync;
 import net.fivew14.xaerosync.common.ChunkCoord;
 import net.minecraft.client.Minecraft;
+import net.minecraft.core.HolderLookup;
 import net.minecraft.resources.ResourceLocation;
 
 import javax.annotation.Nullable;
 import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 
 /**
- * Cache for storing downloaded chunk data on disk.
+ * Cache for storing downloaded chunk data on disk and in memory.
  * <p>
  * Chunks are stored in: .minecraft/xaerosync-cache/{worldId}/{dimension}/{regionX}_{regionZ}/{localX}_{localZ}.bin
  * <p>
  * This cache is separate from Xaero's own storage. When Xaero loads a region/chunk,
  * we check this cache and apply synced data via mixin hooks.
+ * <p>
+ * Deserialized chunks are cached in memory (LRU, max 1000 entries) to avoid repeated
+ * deserialization on the render thread. Deserialization happens asynchronously on a
+ * background thread when chunks are stored.
  */
 public class SyncedChunkCache {
 
@@ -29,10 +36,42 @@ public class SyncedChunkCache {
     // In-memory index of what chunks we have cached (coord -> timestamp)
     private final Map<ChunkCoord, Long> cachedChunks = new ConcurrentHashMap<>();
 
+    // In-memory cache for deserialized chunks (LRU eviction, max 1000 chunks)
+    private static final int MAX_DESERIALIZED_CACHE_SIZE = 1000;
+    private final Map<ChunkCoord, ChunkSerializer.DeserializedChunk> deserializedCache =
+            Collections.synchronizedMap(new LinkedHashMap<ChunkCoord, ChunkSerializer.DeserializedChunk>(
+                    MAX_DESERIALIZED_CACHE_SIZE + 1, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<ChunkCoord, ChunkSerializer.DeserializedChunk> eldest) {
+                    return size() > MAX_DESERIALIZED_CACHE_SIZE;
+                }
+            });
+
+    // Background thread for deserializing chunks (single-threaded to avoid excessive CPU usage)
+    private ExecutorService deserializationExecutor;
+
     // Current world ID
     private String currentWorldId;
 
     private SyncedChunkCache() {
+        recreateExecutor();
+        // Register shutdown hook to gracefully shutdown executor on JVM exit
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            XaeroSync.LOGGER.info("Shutting down XaeroSync deserialization executor");
+            shutdown();
+        }, "XaeroSync-Shutdown"));
+    }
+
+    /**
+     * Create or recreate the deserialization executor.
+     * Called during initialization and when switching worlds.
+     */
+    private void recreateExecutor() {
+        deserializationExecutor = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "XaeroSync-Deserializer");
+            t.setDaemon(true); // Don't prevent JVM shutdown
+            return t;
+        });
     }
 
     public static SyncedChunkCache getInstance() {
@@ -55,8 +94,20 @@ public class SyncedChunkCache {
             return; // Already initialized for this world
         }
 
+        // Drain pending tasks from old world before switching
+        // This prevents race conditions where old world chunks get deserialized after cache is cleared
+        if (currentWorldId != null) {
+            XaeroSync.LOGGER.debug("Draining pending deserialization tasks from old world: {}", currentWorldId);
+            List<Runnable> pendingTasks = deserializationExecutor.shutdownNow();
+            XaeroSync.LOGGER.debug("Cancelled {} pending tasks", pendingTasks.size());
+            
+            // Recreate the executor for the new world
+            recreateExecutor();
+        }
+
         currentWorldId = worldId;
         cachedChunks.clear();
+        deserializedCache.clear();
 
         // Scan cache directory to build index
         Path cacheDir = getCacheDir();
@@ -70,16 +121,53 @@ public class SyncedChunkCache {
 
     /**
      * Clear the cache (on disconnect).
+     * Also shuts down the deserialization executor.
      */
     public void clear() {
         cachedChunks.clear();
+        deserializedCache.clear();
         currentWorldId = null;
+        
+        // Shutdown executor on disconnect to ensure clean state
+        shutdown();
+        // Recreate executor for potential reconnection
+        recreateExecutor();
     }
 
     /**
-     * Store a chunk in the cache.
+     * Shutdown the deserialization executor and clear all in-memory caches.
+     * <p>
+     * This is a terminal operation for the current executor instance. The executor
+     * can be recreated via {@link #recreateExecutor()} if needed (e.g., after reconnection).
+     * <p>
+     * Called when the client is shutting down or disconnecting from a server.
      */
-    public void store(ChunkCoord coord, byte[] data, long timestamp) {
+    public void shutdown() {
+        // Release in-memory references held by the caches
+        deserializedCache.clear();
+        
+        // Cancel any pending deserialization tasks and shut down the executor
+        deserializationExecutor.shutdownNow();
+        try {
+            if (!deserializationExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                XaeroSync.LOGGER.warn("XaeroSync deserialization executor did not terminate within timeout");
+            }
+        } catch (InterruptedException e) {
+            deserializationExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * Store a chunk in the cache and deserialize it asynchronously.
+     * The deserialized chunk will be available via getDeserializedChunk() once complete.
+     * 
+     * @param coord Chunk coordinate
+     * @param data Serialized chunk data
+     * @param timestamp Timestamp of the chunk
+     * @param registryAccess Registry access provider (captured from main thread)
+     */
+    public void store(ChunkCoord coord, byte[] data, long timestamp, HolderLookup.Provider registryAccess) {
         if (currentWorldId == null) {
             XaeroSync.LOGGER.warn("Cannot store chunk - cache not initialized");
             return;
@@ -104,9 +192,69 @@ public class SyncedChunkCache {
             cachedChunks.put(coord, timestamp);
             XaeroSync.LOGGER.debug("Stored chunk {} in cache (timestamp: {})", coord, timestamp);
 
+            // Deserialize asynchronously in the background to populate the in-memory cache
+            // This avoids blocking the render thread when the chunk is later applied
+            deserializeAsync(coord, data, registryAccess);
+
         } catch (IOException e) {
             XaeroSync.LOGGER.error("Failed to store chunk {} in cache", coord, e);
         }
+    }
+
+    /**
+     * Deserialize a chunk asynchronously in the background.
+     * The deserialized chunk will be stored in the in-memory cache.
+     * 
+     * @param coord Chunk coordinate
+     * @param data Serialized chunk data
+     * @param registryAccess Registry access provider (captured from main thread for thread safety)
+     */
+    private void deserializeAsync(ChunkCoord coord, byte[] data, HolderLookup.Provider registryAccess) {
+        // Capture the current world ID to validate later in the background thread
+        final String worldIdAtSubmit = currentWorldId;
+        
+        try {
+            deserializationExecutor.submit(() -> {
+                try {
+                    // Validate that we're still in the same world before deserializing
+                    // This prevents race conditions during world switching
+                    if (!Objects.equals(worldIdAtSubmit, currentWorldId)) {
+                        XaeroSync.LOGGER.debug("Skipping deserialization of {} - world changed from {} to {}", 
+                                coord, worldIdAtSubmit, currentWorldId);
+                        return;
+                    }
+
+                    ChunkSerializer.DeserializedChunk deserialized =
+                            ChunkSerializer.deserialize(data, registryAccess);
+
+                    if (deserialized != null) {
+                        // Double-check world ID before adding to cache
+                        if (Objects.equals(worldIdAtSubmit, currentWorldId)) {
+                            deserializedCache.put(coord, deserialized);
+                            XaeroSync.LOGGER.debug("Deserialized chunk {} in background", coord);
+                        } else {
+                            XaeroSync.LOGGER.debug("Discarding deserialized chunk {} - world changed", coord);
+                        }
+                    } else {
+                        XaeroSync.LOGGER.warn("Failed to deserialize chunk {} in background", coord);
+                    }
+                } catch (Exception e) {
+                    XaeroSync.LOGGER.error("Error deserializing chunk {} in background", coord, e);
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            // Executor was shut down while we were trying to submit
+            XaeroSync.LOGGER.debug("Cannot deserialize {} - executor is shut down", coord);
+        }
+    }
+
+    /**
+     * Get a deserialized chunk from the in-memory cache.
+     * Returns null if not yet deserialized or not in cache.
+     */
+    @Nullable
+    public ChunkSerializer.DeserializedChunk getDeserializedChunk(ChunkCoord coord) {
+        return deserializedCache.get(coord);
     }
 
     /**
@@ -168,6 +316,7 @@ public class SyncedChunkCache {
      */
     public void remove(ChunkCoord coord) {
         cachedChunks.remove(coord);
+        deserializedCache.remove(coord);
 
         Path chunkFile = getChunkFile(coord);
         if (chunkFile != null) {
