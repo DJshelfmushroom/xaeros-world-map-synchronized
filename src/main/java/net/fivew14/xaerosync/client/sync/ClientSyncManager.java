@@ -81,6 +81,17 @@ public class ClientSyncManager {
     private final Map<ChunkCoord, Long> recentlyQueuedChunks = new ConcurrentHashMap<>();
     private static final long DEBOUNCE_CLEANUP_INTERVAL_MS = 60_000;
 
+    // Cached sorted queues for pollClosest optimization
+    // Only resort when queue changes significantly or player moves far
+    private List<ChunkCoord> sortedUploadQueue = new ArrayList<>();
+    private List<ChunkCoord> sortedDownloadQueue = new ArrayList<>();
+    private int lastUploadQueueSize = 0;
+    private int lastDownloadQueueSize = 0;
+    private int lastSortPlayerChunkX = 0;
+    private int lastSortPlayerChunkZ = 0;
+    private static final int RESORT_PLAYER_DISTANCE_THRESHOLD = 16; // Resort if player moves 16+ chunks (1024 blocks)
+    private static final int RESORT_QUEUE_SIZE_CHANGE_THRESHOLD = 10; // Resort if queue size changes by 10+
+
     private long lastTimestampSaveTime = 0;
     private long lastCacheProcessTime = 0;
     private long lastDebounceCleanupTime = 0;
@@ -114,6 +125,10 @@ public class ClientSyncManager {
         uploadQueueSet.clear();
         downloadQueueSet.clear();
         pendingDownloads.clear();
+        sortedUploadQueue.clear();
+        sortedDownloadQueue.clear();
+        lastUploadQueueSize = 0;
+        lastDownloadQueueSize = 0;
         XaeroSync.LOGGER.debug("Connected to server");
     }
 
@@ -129,6 +144,10 @@ public class ClientSyncManager {
         downloadQueueSet.clear();
         pendingDownloads.clear();
         recentlyQueuedChunks.clear();
+        sortedUploadQueue.clear();
+        sortedDownloadQueue.clear();
+        lastUploadQueueSize = 0;
+        lastDownloadQueueSize = 0;
         SyncedChunkCache.getInstance().clear();
         XaeroSync.LOGGER.debug("Disconnected from server");
     }
@@ -459,16 +478,16 @@ public class ClientSyncManager {
         // Update player position for distance-based prioritization
         updatePlayerPosition();
 
-        // Process uploads - pick closest chunk to player
-        while (!uploadQueueSet.isEmpty() && uploadLimiter.tryAcquire()) {
+        // Process uploads - pick closest chunk to player (max 1 per tick)
+        if (!uploadQueueSet.isEmpty() && uploadLimiter.tryAcquire()) {
             ChunkCoord coord = pollClosest(uploadQueueSet);
             if (coord != null) {
                 processUpload(coord);
             }
         }
 
-        // Process download requests - pick closest chunk to player
-        while (!downloadQueueSet.isEmpty() && downloadLimiter.tryAcquire()) {
+        // Process download requests - pick closest chunk to player (max 1 per tick)
+        if (!downloadQueueSet.isEmpty() && downloadLimiter.tryAcquire()) {
             ChunkCoord coord = pollClosest(downloadQueueSet);
             if (coord != null) {
                 requestDownload(coord);
@@ -489,9 +508,115 @@ public class ClientSyncManager {
 
     /**
      * Poll and remove the closest chunk to the player from the set.
+     * Uses cached sorted lists to avoid O(n) iteration on every call.
+     * Re-sorts only when the queue changes significantly or player moves far.
      */
     @Nullable
     private ChunkCoord pollClosest(Set<ChunkCoord> set) {
+        if (set.isEmpty()) return null;
+
+        // Determine which cached list to use
+        List<ChunkCoord> sortedList;
+        int lastQueueSize;
+        
+        if (set == uploadQueueSet) {
+            sortedList = sortedUploadQueue;
+            lastQueueSize = lastUploadQueueSize;
+        } else if (set == downloadQueueSet) {
+            sortedList = sortedDownloadQueue;
+            lastQueueSize = lastDownloadQueueSize;
+        } else {
+            // Fallback for unknown sets (shouldn't happen)
+            return pollClosestFallback(set);
+        }
+
+        // Check if we need to resort
+        int queueSizeChange = Math.abs(set.size() - lastQueueSize);
+        int playerMoveDist = Math.abs(playerChunkX - lastSortPlayerChunkX) +
+                            Math.abs(playerChunkZ - lastSortPlayerChunkZ);
+        
+        boolean needsResort = sortedList.isEmpty() ||
+                             queueSizeChange >= RESORT_QUEUE_SIZE_CHANGE_THRESHOLD ||
+                             playerMoveDist >= RESORT_PLAYER_DISTANCE_THRESHOLD;
+
+        if (needsResort) {
+            // Resort the queue
+            sortedList = new ArrayList<>(set);
+            sortQueue(sortedList);
+            
+            // Update cached state
+            if (set == uploadQueueSet) {
+                sortedUploadQueue = sortedList;
+                lastUploadQueueSize = set.size();
+            } else {
+                sortedDownloadQueue = sortedList;
+                lastDownloadQueueSize = set.size();
+            }
+            lastSortPlayerChunkX = playerChunkX;
+            lastSortPlayerChunkZ = playerChunkZ;
+            
+            XaeroSync.LOGGER.debug("Resorted queue with {} chunks (size change: {}, player moved: {} chunks)",
+                    sortedList.size(), queueSizeChange, playerMoveDist);
+        }
+
+        // Poll from the sorted list (front should be closest)
+        // Remove items that are no longer in the set (may have been removed elsewhere)
+        ChunkCoord result = null;
+        Iterator<ChunkCoord> it = sortedList.iterator();
+        while (it.hasNext()) {
+            ChunkCoord coord = it.next();
+            if (set.remove(coord)) {
+                result = coord;
+                it.remove();
+                break;
+            } else {
+                // Not in set anymore - clean up sorted list
+                it.remove();
+            }
+        }
+
+        return result;
+    }
+
+    /**
+     * Sort a queue of chunks by distance to player (closest first).
+     */
+    private void sortQueue(List<ChunkCoord> queue) {
+        // Convert player chunk coords to our chunk coords (64-block chunks = 4 MC chunks)
+        int playerSyncChunkX = playerChunkX >> 2;
+        int playerSyncChunkZ = playerChunkZ >> 2;
+
+        // Get current dimension for filtering
+        Minecraft mc = Minecraft.getInstance();
+        ResourceLocation currentDim = mc.level != null ? mc.level.dimension().location() : null;
+
+        queue.sort((a, b) -> {
+            int distSqA = calculateDistanceSq(a, playerSyncChunkX, playerSyncChunkZ, currentDim);
+            int distSqB = calculateDistanceSq(b, playerSyncChunkX, playerSyncChunkZ, currentDim);
+            return Integer.compare(distSqA, distSqB);
+        });
+    }
+
+    /**
+     * Calculate distance squared from a chunk to the player.
+     */
+    private int calculateDistanceSq(ChunkCoord coord, int playerSyncChunkX, int playerSyncChunkZ, 
+                                     ResourceLocation currentDim) {
+        if (coord.dimension().equals(currentDim)) {
+            int dx = coord.x() - playerSyncChunkX;
+            int dz = coord.z() - playerSyncChunkZ;
+            return dx * dx + dz * dz;
+        } else {
+            return Integer.MAX_VALUE - 1; // Other dimensions are lower priority
+        }
+    }
+
+    /**
+     * Fallback implementation for pollClosest when set is not a known queue.
+     * Uses O(n) iteration like the original implementation.
+     */
+    @Nullable
+    private ChunkCoord pollClosestFallback(Set<ChunkCoord> set) {
         if (set.isEmpty()) return null;
 
         ChunkCoord closest = null;
@@ -506,17 +631,7 @@ public class ClientSyncManager {
         ResourceLocation currentDim = mc.level != null ? mc.level.dimension().location() : null;
 
         for (ChunkCoord coord : set) {
-            // Only consider chunks in the current dimension for distance calculation
-            // (chunks in other dimensions get MAX_VALUE distance, effectively deprioritized)
-            int distSq;
-            if (coord.dimension().equals(currentDim)) {
-                int dx = coord.x() - playerSyncChunkX;
-                int dz = coord.z() - playerSyncChunkZ;
-                distSq = dx * dx + dz * dz;
-            } else {
-                distSq = Integer.MAX_VALUE - 1; // Other dimensions are lower priority
-            }
-
+            int distSq = calculateDistanceSq(coord, playerSyncChunkX, playerSyncChunkZ, currentDim);
             if (distSq < closestDistSq) {
                 closestDistSq = distSq;
                 closest = coord;
@@ -524,10 +639,7 @@ public class ClientSyncManager {
         }
 
         if (closest != null) {
-            boolean removed = set.remove(closest);
-            if (!removed) {
-                XaeroSync.LOGGER.warn("[DEBUG] Failed to remove {} from set! Set size: {}", closest, set.size());
-            }
+            set.remove(closest);
         }
         return closest;
     }

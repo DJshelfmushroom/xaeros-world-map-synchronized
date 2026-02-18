@@ -49,6 +49,9 @@ public class SyncedChunkCache {
 
     // Background thread for deserializing chunks (single-threaded to avoid excessive CPU usage)
     private ExecutorService deserializationExecutor;
+    
+    // Chunks that are pending application and need priority deserialization
+    private final Set<ChunkCoord> priorityDeserialization = ConcurrentHashMap.newKeySet();
 
     // Current world ID
     private String currentWorldId;
@@ -108,6 +111,7 @@ public class SyncedChunkCache {
         currentWorldId = worldId;
         cachedChunks.clear();
         deserializedCache.clear();
+        priorityDeserialization.clear();
 
         // Scan cache directory to build index
         Path cacheDir = getCacheDir();
@@ -126,6 +130,7 @@ public class SyncedChunkCache {
     public void clear() {
         cachedChunks.clear();
         deserializedCache.clear();
+        priorityDeserialization.clear();
         currentWorldId = null;
         
         // Shutdown executor on disconnect to ensure clean state
@@ -221,6 +226,7 @@ public class SyncedChunkCache {
                     if (!Objects.equals(worldIdAtSubmit, currentWorldId)) {
                         XaeroSync.LOGGER.debug("Skipping deserialization of {} - world changed from {} to {}", 
                                 coord, worldIdAtSubmit, currentWorldId);
+                        priorityDeserialization.remove(coord);
                         return;
                     }
 
@@ -231,20 +237,62 @@ public class SyncedChunkCache {
                         // Double-check world ID before adding to cache
                         if (Objects.equals(worldIdAtSubmit, currentWorldId)) {
                             deserializedCache.put(coord, deserialized);
-                            XaeroSync.LOGGER.debug("Deserialized chunk {} in background", coord);
+                            boolean wasPriority = priorityDeserialization.remove(coord);
+                            if (wasPriority) {
+                                XaeroSync.LOGGER.debug("Deserialized priority chunk {} in background", coord);
+                            } else {
+                                XaeroSync.LOGGER.debug("Deserialized chunk {} in background", coord);
+                            }
                         } else {
                             XaeroSync.LOGGER.debug("Discarding deserialized chunk {} - world changed", coord);
+                            priorityDeserialization.remove(coord);
                         }
                     } else {
                         XaeroSync.LOGGER.warn("Failed to deserialize chunk {} in background", coord);
+                        priorityDeserialization.remove(coord);
                     }
                 } catch (Exception e) {
                     XaeroSync.LOGGER.error("Error deserializing chunk {} in background", coord, e);
+                    priorityDeserialization.remove(coord);
                 }
             });
         } catch (RejectedExecutionException e) {
             // Executor was shut down while we were trying to submit
             XaeroSync.LOGGER.debug("Cannot deserialize {} - executor is shut down", coord);
+            priorityDeserialization.remove(coord);
+        }
+    }
+
+    /**
+     * Request priority deserialization for a chunk that is pending application.
+     * If the chunk is not yet deserialized, schedules it for immediate background deserialization.
+     * This is called when applyChunk() finds a chunk that needs to be applied but isn't ready yet.
+     * 
+     * @param coord Chunk coordinate
+     */
+    public void requestPriorityDeserialization(ChunkCoord coord) {
+        // Check if already deserialized
+        if (deserializedCache.containsKey(coord)) {
+            return;
+        }
+        
+        // Check if we have the raw data in cache
+        if (!cachedChunks.containsKey(coord)) {
+            return;
+        }
+        
+        // Mark for priority and trigger deserialization if not already requested
+        if (priorityDeserialization.add(coord)) {
+            XaeroSync.LOGGER.debug("Priority deserialization requested for {}", coord);
+            
+            // Load from disk and deserialize in background
+            CachedChunk cached = load(coord);
+            if (cached != null) {
+                Minecraft mc = Minecraft.getInstance();
+                if (mc.level != null) {
+                    deserializeAsync(coord, cached.data(), mc.level.registryAccess());
+                }
+            }
         }
     }
 

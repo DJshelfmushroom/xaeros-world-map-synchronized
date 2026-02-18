@@ -227,23 +227,11 @@ public class SyncedChunkApplier {
         ChunkSerializer.DeserializedChunk deserializedChunk = cache.getDeserializedChunk(coord);
 
         if (deserializedChunk == null) {
-            // Not in memory cache - need to load and deserialize
-            // This should be rare if background deserialization is working
-            XaeroSync.LOGGER.debug("Deserialized chunk {} not in memory cache, loading from disk", coord);
-
-            SyncedChunkCache.CachedChunk cached = cache.load(coord);
-            if (cached == null) {
-                return false;
-            }
-
-            // Deserialize on render thread as fallback
-            // This may cause stuttering but ensures correctness
-            deserializedChunk = ChunkSerializer.deserialize(cached.data(), mc.level.registryAccess());
-
-            if (deserializedChunk == null) {
-                XaeroSync.LOGGER.warn("Failed to deserialize cached chunk {}", coord);
-                return false;
-            }
+            // Not in memory cache yet - let the background thread finish deserializing
+            // Trigger priority deserialization to speed up the process
+            cache.requestPriorityDeserialization(coord);
+            XaeroSync.LOGGER.debug("Chunk {} not yet deserialized, deferring application", coord);
+            return false;
         }
 
         WorldMapSession session = WorldMapSession.getCurrentSession();
