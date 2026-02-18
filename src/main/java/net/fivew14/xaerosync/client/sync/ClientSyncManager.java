@@ -276,8 +276,15 @@ public class ClientSyncManager {
         ChunkCoord coord = new ChunkCoord(dim, packet.getX(), packet.getZ());
         pendingDownloads.remove(coord);
 
+        // Capture registry access on the main thread for thread-safe background deserialization
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.level == null) {
+            XaeroSync.LOGGER.warn("Cannot store chunk {} - level not available", coord);
+            return;
+        }
+
         // Store in cache - the mixin will apply it when Xaero loads the region
-        SyncedChunkCache.getInstance().store(coord, packet.getData(), packet.getTimestamp());
+        SyncedChunkCache.getInstance().store(coord, packet.getData(), packet.getTimestamp(), mc.level.registryAccess());
         timestampTracker.setLocalTimestamp(coord, packet.getTimestamp());
 
         // Try to apply immediately if region is already loaded
